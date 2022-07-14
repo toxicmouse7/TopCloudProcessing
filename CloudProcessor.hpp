@@ -53,8 +53,17 @@ private:
 
     static cv::Mat removeHoles(const cv::Mat& image, int radius);
 
+    static cv::Mat RemoveHolesWithMeans(const cv::Mat& img, int delta);
+
+    static cv::Mat RemoveHolesWithReplaceExpanding(const cv::Mat& img);
+
+    static pcl::PointCloud<pcl::PointXYZRGB>::Ptr ProjectToPlane(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud,
+                                                                 const Eigen::Vector3f& origin,
+                                                                 const Eigen::Vector3f& axis_x,
+                                                                 const Eigen::Vector3f& axis_y);
+
     static std::list<cv::Vec3b> getPixelsInRadius(const cv::Mat& img, const cv::Point2i& point, int radius,
-                                           const std::function<bool(const cv::Vec3b&)>& pred);
+                                                  const std::function<bool(const cv::Vec3b&)>& pred);
 
 public:
     explicit CloudProcessor(const std::string& ply_file);
@@ -74,6 +83,8 @@ public:
     void moveToBase();
 
     void exportRGBImage(const std::string& path, const cv::Size& imgSize, int radius);
+
+    void exportRGBExperimental(const std::string& path);
 };
 
 CloudProcessor::CloudProcessor(const std::string& ply_file)
@@ -267,9 +278,12 @@ void CloudProcessor::exportRGBImage(const std::string& path, const cv::Size& img
     cv::Mat image = cv::Mat::zeros(imgSize, CV_8UC3);
 
     float zMax = std::max_element(pointCloud->begin(), pointCloud->end(), z_comp)->z;
+    float xMax = std::max_element(pointCloud->begin(), pointCloud->end(), x_comp)->x;
+    float yMax = std::max_element(pointCloud->begin(), pointCloud->end(), y_comp)->y;
+    std::cout << xMax << ' ' << yMax << '\n';
 
-    double xCoefficient = (imgSize.width - 1) / 2.5;
-    double yCoefficient = (imgSize.height - 1) / 1.35;
+    double xCoefficient = (imgSize.width - 1) / 1.82;
+    double yCoefficient = (imgSize.height - 1) / 0.62;
     double zCoefficient = UCHAR_MAX / zMax;
 
     for (auto& point: *pointCloud)
@@ -288,10 +302,34 @@ void CloudProcessor::exportRGBImage(const std::string& path, const cv::Size& img
 
     cv::flip(image, image, 0);
 
-    for (int i = 0; i < radius; ++i)
-        image = removeHoles(image, 3);
+//    for (int i = 0; i < radius; ++i)
+//        image = removeHoles(image, 3);
+//    for (int i = 0; i < radius; ++i)
+//        image = RemoveHolesWithReplaceExpanding(image);
+
+    image = RemoveHolesWithMeans(image, radius);
 
     cv::imwrite(path, image);
+}
+
+pcl::PointCloud<pcl::PointXYZRGB>::Ptr CloudProcessor::ProjectToPlane(pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud,
+                                                                      const Eigen::Vector3f& origin,
+                                                                      const Eigen::Vector3f& axis_x,
+                                                                      const Eigen::Vector3f& axis_y)
+{
+    pcl::PointCloud<pcl::PointXYZRGB>::Ptr aux_cloud(new pcl::PointCloud<pcl::PointXYZRGB>);
+    pcl::copyPointCloud(*cloud, *aux_cloud);
+
+    auto normal = axis_x.cross(axis_y);
+    Eigen::Hyperplane<float, 3> plane(normal, origin);
+
+    for (auto& itPoint: *aux_cloud)
+    {
+        // project point to plane
+        auto proj = plane.projection(itPoint.getVector3fMap());
+        itPoint.getVector3fMap() = proj;
+    }
+    return aux_cloud;
 }
 
 cv::Mat CloudProcessor::removeHoles(const cv::Mat& image, int radius)
@@ -322,6 +360,71 @@ cv::Mat CloudProcessor::removeHoles(const cv::Mat& image, int radius)
     }
 
     return std::move(newImage);
+}
+
+cv::Mat CloudProcessor::RemoveHolesWithMeans(const cv::Mat& img, int delta)
+{
+    cv::Mat new_img;
+    img.copyTo(new_img);
+
+    for (int y = 0; y < img.rows; ++y)
+    {
+        for (int x = 0; x < img.cols; x += 1)
+        {
+            auto pixels = getPixelsInRadius(img, {x, y}, delta,
+                                            [](const cv::Vec3b& p)
+                                            {
+                                                return p != cv::Vec3b{0, 0, 0};
+                                            });
+            if (pixels.size() >= 5)
+            {
+                cv::Vec3i colors = {0, 0, 0};
+                for (auto& pix: pixels)
+                    colors += pix;
+                for (int i = 0; i < 3; ++i)
+                    colors[i] /= (int) pixels.size();
+                new_img.at<cv::Vec3b>(y, x) = colors;
+            }
+        }
+    }
+    //new_img.at<cv::Vec3b>(0, 0) = {0, 0, 255};
+
+    return new_img;
+}
+
+cv::Mat CloudProcessor::RemoveHolesWithReplaceExpanding(const cv::Mat& img)
+{
+    const int radius = 7;
+    const cv::Vec3b blackPoint = {0, 0, 0};
+    cv::Mat new_img;
+    img.copyTo(new_img);
+
+    for (int y = 0 + radius; y < img.rows - radius; ++y)
+    {
+        for (int x = 0 + radius; x < img.cols - radius; ++x)
+        {
+            if (img.at<cv::Vec3b>(y, x) != blackPoint)
+                continue;
+            std::list<cv::Vec3b> pixels;
+
+            for (auto inc_radius = 3; pixels.empty() && inc_radius <= 7; inc_radius += 2)
+            {
+                pixels = getPixelsInRadius(img, {x, y}, inc_radius,
+                                           [](const cv::Vec3b& p)
+                                           {
+                                               return p != cv::Vec3b{0, 0, 0};
+                                           });
+            }
+
+            if (pixels.empty())
+                continue;
+
+            new_img.at<cv::Vec3b>(y, x) = pixels.front();
+            x += radius * 2;
+        }
+    }
+
+    return std::move(new_img);
 }
 
 std::list<cv::Vec3b> CloudProcessor::getPixelsInRadius(const cv::Mat& img, const cv::Point2i& point, int radius,
@@ -376,6 +479,25 @@ std::list<cv::Vec3b> CloudProcessor::getPixelsInRadius(const cv::Mat& img, const
     }
 
     return std::move(result);
+}
+
+void CloudProcessor::exportRGBExperimental(const std::string& path)
+{
+    auto projection = ProjectToPlane(pointCloud, {0, 0, 0}, {1, 0, 0}, {0, 1, 0});
+
+    pcl::visualization::PCLVisualizer viewer;
+
+    viewer.addPointCloud(projection);
+    viewer.setShowFPS(false);
+    viewer.setBackgroundColor(0, 0, 0);
+    viewer.setCameraPosition(1, 0, -2.2, 0.75, 0.5, 1.5
+                             , 0, 0, 0);
+    viewer.saveScreenshot(path);
+
+    while (!viewer.wasStopped())
+    {
+        viewer.spinOnce(100);
+    }
 }
 
 

@@ -21,7 +21,9 @@ int main(int argc, char* argv[])
     processor.reset(processor.extractMaxCluster());
     processor.moveToBase();
 
-    processor.exportRGBImage(argv[3], {1920, 1080}, std::stoi(argv[2]));
+    processor.exportRGBExperimental(argv[3]);
+
+    //processor.exportRGBImage(argv[3], {1920, 1080}, std::stoi(argv[2]));
 
     return 0;
 }
